@@ -32,18 +32,27 @@ matches["toss_winner_id"] = team_encoder.transform(matches["toss_winner"])
 matches["venue_id"] = venue_encoder.fit_transform(matches["venue"])
 
 # Target variable
-df_matches = matches.copy()
-df_matches["team1_win"] = (df_matches["winner"] == df_matches["team1"]).astype(int)
+matches["team1_win"] = (matches["winner"] == matches["team1"]).astype(int)
 
 # Toss feature
-df_matches["toss_decision_bin"] = df_matches["toss_decision"].map({"bat": 0, "field": 1})
+matches["toss_decision_bin"] = matches["toss_decision"].map({"bat": 0, "field": 1})
+
+# Now make a working copy for merges including all match-level columns
+df_matches = matches.copy()
 
 # Filter deliveries to first innings
 deliveries_first = deliveries[deliveries['inning'] == 1].copy()
 
 # Legal balls count
 legal = deliveries_first[~deliveries_first['extras_type'].isin(['wides', 'noballs'])]
-legal_balls = legal.groupby('match_id')['ball'].count().reset_index().rename(columns={'ball':'balls'})
+legal_balls = legal.groupby('match_id')['ball'] \
+    .count().reset_index().rename(columns={'ball':'balls'})
+
+# Extras: wides and no-balls count
+wides = deliveries_first[deliveries_first['extras_type'] == 'wides'] \
+    .groupby('match_id')['ball'].count().reset_index().rename(columns={'ball':'total_wides'})
+noballs = deliveries_first[deliveries_first['extras_type'] == 'noballs'] \
+    .groupby('match_id')['ball'].count().reset_index().rename(columns={'ball':'total_noballs'})
 
 # First-innings summary stats
 i_summary = (
@@ -52,7 +61,13 @@ i_summary = (
          wickets=('player_dismissed', lambda x: x.notna().sum()))
     .reset_index()
 )
-i_summary = i_summary.merge(legal_balls, on='match_id', how='left').fillna(0)
+i_summary = (
+    i_summary
+    .merge(legal_balls, on='match_id', how='left')
+    .merge(wides, on='match_id', how='left')
+    .merge(noballs, on='match_id', how='left')
+    .fillna(0)
+)
 
 # Best batter stats
 bat_stats = (
@@ -100,19 +115,20 @@ boundary_stats = (
     .reset_index()
 )
 boundary_stats = boundary_stats.merge(matches[['id','team1']], left_on=['match_id','batting_team'], right_on=['id','team1'])
-boundary_stats = boundary_stats[['match_id','total_fours','total_sixes']]
-boundary_stats = boundary_stats.rename(columns={'match_id':'id'})
+boundary_stats = boundary_stats[['match_id','total_fours','total_sixes']].rename(columns={'match_id':'id'})
 
 dot_stats = (
     deliveries_first.groupby(['match_id','bowling_team'])
+
     .agg(total_dot_balls=('total_runs', lambda x: (x==0).sum()))
     .reset_index()
 )
 dot_stats = dot_stats.merge(matches[['id','team2']], left_on=['match_id','bowling_team'], right_on=['id','team2'])
-dot_stats = dot_stats[['match_id','total_dot_balls']]
-dot_stats = dot_stats.rename(columns={'match_id':'id'})
+dot_stats = dot_stats[['match_id','total_dot_balls']].rename(columns={'match_id':'id'})
 
 # Merge all features
+# now df_matches has the encoded columns
+
 df = df_matches.merge(i_summary.rename(columns={'match_id':'id'}), on='id', how='left')
 df = df.merge(best_bat.rename(columns={'match_id':'id'}), on='id', how='left')
 df = df.merge(best_bowl.rename(columns={'match_id':'id'}), on='id', how='left')
@@ -136,6 +152,10 @@ home_venues = {
 df['team1_home'] = df.apply(lambda r: int(r['venue'] in home_venues.get(r['team1'],[])), axis=1)
 
 # Match stage features
+
+
+
+# Match stage features
 df = df.sort_values(['season','id']).reset_index(drop=True)
 df['match_number'] = df.groupby('season').cumcount()+1
 df['total_matches_in_season'] = df.groupby('season')['id'].transform('count')
@@ -152,7 +172,7 @@ df['season_weight'] = df['season'].apply(lambda x: 3 if x==current_season else (
 FEATURES = [
     'season','team1_id','team2_id','venue_id',
     'toss_winner_id','toss_decision_bin',
-    'total_runs','balls','wickets',
+    'total_runs','balls','wickets','total_wides','total_noballs',
     'best_bat_runs','max_fours','max_sixes','century_hit','half_century_hit',
     'best_bowl_wkts','best_dot_balls','best_economy',
     'total_fours','total_sixes','total_dot_balls',
@@ -161,7 +181,9 @@ FEATURES = [
 X = df[FEATURES]
 y = df['team1_win']
 
-# Split 2024 season
+# Continue with train/test split and modeling as before...
+
+
 df_2024 = df[df['season'] == current_season]
 df_past = df[df['season'] < current_season]
 X_train_2024, X_test_2024, y_train_2024, y_test_2024 = train_test_split(
@@ -186,12 +208,12 @@ rf_search = RandomizedSearchCV(
 )
 rf_search.fit(X_train, y_train, sample_weight=df.loc[y_train.index, 'season_weight'])
 best_rf = rf_search.best_estimator_
-print("🔎 Best RF params:", rf_search.best_params_)
-print(f"🌟 RF Best CV accuracy: {rf_search.best_score_:.4f}")
+print(" Best RF params:", rf_search.best_params_)
+print(f" RF Best CV accuracy: {rf_search.best_score_:.4f}")
 
 # Evaluate RF
 y_pred_rf = best_rf.predict(X_test)
-print(f"\n✅ RF Accuracy: {accuracy_score(y_test,y_pred_rf):.4f}")
+print(f"\n RF Accuracy: {accuracy_score(y_test,y_pred_rf):.4f}")
 print(classification_report(y_test,y_pred_rf))
 
 # -------- Neural Network (MLP) --------
@@ -213,11 +235,11 @@ nn_search = RandomizedSearchCV(
 )
 nn_search.fit(X_train_scaled, y_train)
 best_nn = nn_search.best_estimator_
-print("🔎 Best NN params:", nn_search.best_params_)
+print(" Best NN params:", nn_search.best_params_)
 
 # Evaluate NN
 y_pred_nn = best_nn.predict(X_test_scaled)
-print(f"\n🤖 NN Accuracy: {accuracy_score(y_test,y_pred_nn):.4f}")
+print(f"\n NN Accuracy: {accuracy_score(y_test,y_pred_nn):.4f}")
 print(classification_report(y_test,y_pred_nn))
 
 # Feature Importance
@@ -228,3 +250,74 @@ plt.xlabel('Importance')
 plt.title('Feature Importance (Random Forest)')
 plt.tight_layout()
 plt.show()
+
+# -------- User-Friendly Input Mapping --------
+team_names = list(team_encoder.classes_)
+venue_names = list(venue_encoder.classes_)
+
+def get_team_id(name):
+    return team_encoder.transform([name])[0]
+
+def get_venue_id(name):
+    return venue_encoder.transform([name])[0]
+
+print("\n Enter match details for prediction (season is fixed to 2024):")
+
+print("\nAvailable Teams:")
+for idx, name in enumerate(team_names): print(f"{idx}: {name}")
+team1_name = input("Enter Team 1 Name: ")
+team2_name = input("Enter Team 2 Name: ")
+toss_winner_name = input("Enter Toss Winner Name: ")
+
+print("\nAvailable Venues:")
+for idx, name in enumerate(venue_names): print(f"{idx}: {name}")
+venue_name = input("Enter Venue Name: ")
+
+# Map names to IDs
+team1_id = get_team_id(team1_name)
+team2_id = get_team_id(team2_name)
+toss_winner_id = get_team_id(toss_winner_name)
+venue_id = get_venue_id(venue_name)
+
+# Rest of the inputs
+user_input = {
+    'season': 2024,
+    'team1_id': team1_id,
+    'team2_id': team2_id,
+    'venue_id': venue_id,
+    'toss_winner_id': toss_winner_id,
+    'toss_decision_bin': int(input("Toss Decision (bat=0 / field=1): ")),
+    'total_runs': int(input("First Innings Total Runs: ")),
+    'balls': int(input("Legal Balls Bowled (max 120): ")),
+    'wickets': int(input("Wickets Lost: ")),
+    'total_wides': int(input("Wides Bowled: ")),
+    'total_noballs': int(input("No Balls Bowled: ")),
+    'best_bat_runs': int(input("Best Batter Runs: ")),
+    'max_fours': int(input("Max Fours by a Batter: ")),
+    'max_sixes': int(input("Max Sixes by a Batter: ")),
+    'century_hit': int(input("Any Century Hit? (yes=1 / no=0): ")),
+    'half_century_hit': int(input("Any Half-Century Hit? (yes=1 / no=0): ")),
+    'best_bowl_wkts': int(input("Best Bowler Wickets: ")),
+    'best_dot_balls': int(input("Best Dot Balls: ")),
+    'best_economy': float(input("Best Economy Rate: ")),
+    'total_fours': int(input("Total Fours by Team: ")),
+    'total_sixes': int(input("Total Sixes by Team: ")),
+    'total_dot_balls': int(input("Total Dot Balls by Bowling Team: ")),
+    'team1_home': int(input("Is Team1 playing at Home? (yes=1 / no=0): ")),
+    'is_after_half': int(input("Is the match after mid-season? (yes=1 / no=0): ")),
+    'is_playoff': int(input("Is it a playoff match? (yes=1 / no=0): ")),
+    'is_final': int(input("Is it the final match? (yes=1 / no=0): ")),
+    'season_weight': 3
+}
+
+# Prediction section
+user_df = pd.DataFrame([user_input])
+user_scaled = scaler.transform(user_df)
+rf_pred = best_rf.predict(user_df)[0]
+nn_prob = best_nn.predict_proba(user_scaled)[0][1]
+nn_pred = (nn_prob > 0.5).astype(int)
+
+# Output predictions
+print("\n Predictions:")
+print(f"Random Forest Prediction: {'Team 1 Wins' if rf_pred == 1 else 'Team 2 Wins'}")
+print(f"Neural Network Prediction: {'Team 1 Wins' if nn_pred == 1 else 'Team 2 Wins'} (Probability: {nn_prob:.2f})")
